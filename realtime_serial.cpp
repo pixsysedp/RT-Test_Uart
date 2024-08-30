@@ -8,12 +8,16 @@
 #include <sched.h>
 #include <errno.h>
 #include <getopt.h>
+#include <pthread.h>
 
 #define VERSION "1.0"
 #define AUTHOR "Mauro Soligo"
 #define EMAIL "mauro.soligo@gmail.com"
 #define DATE "August 29, 2024"
+#define DEFAULT_CYCLE_TIME_US 1000  // Default cycle time in microseconds
 #define NUM_ITERATIONS 1000
+
+volatile int keep_running = 1;
 
 void print_banner()
 {
@@ -28,14 +32,15 @@ void print_banner()
 
 void print_usage(const char *prog_name)
 {
-    printf("Usage: %s -p <serial_port>\n", prog_name);
-    printf("  -p <serial_port>  Serial port (e.g., /dev/ttyS0)\n");
+    printf("Usage: %s -p <serial_port> [-t <cycle_time_us>]\n", prog_name);
+    printf("  -p <serial_port>      Serial port (e.g., /dev/ttyS0)\n");
+    printf("  -t <cycle_time_us>    Cycle time in microseconds (default 1000 us)\n");
 }
 
 void set_realtime_priority()
 {
     struct sched_param schedParam;
-    schedParam.sched_priority = 99; // Massima priorità per SCHED_FIFO
+    schedParam.sched_priority = 99; // Highest priority for SCHED_FIFO
     if (sched_setscheduler(0, SCHED_FIFO, &schedParam) != 0)
     {
         perror("sched_setscheduler failed");
@@ -64,25 +69,25 @@ int configure_serial_port(const char *port_name)
         exit(EXIT_FAILURE);
     }
 
-    // Configurazione della velocità della porta seriale a 1 Mbit/s
+    // Set baud rate to 1 Mbit/s
     cfsetospeed(&tty, B1000000);
     cfsetispeed(&tty, B1000000);
 
-    // Configurazione 8N1 (8 bit di dati, nessuna parità, 1 bit di stop)
+    // Configure 8N1 (8 data bits, no parity, 1 stop bit)
     tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
     tty.c_cflag |= (CLOCAL | CREAD);
-    tty.c_cflag &= ~(PARENB | PARODD); // Disabilita parità
-    tty.c_cflag &= ~CSTOPB;            // 1 bit di stop
-    tty.c_cflag &= ~CRTSCTS;           // Disabilita controllo hardware
+    tty.c_cflag &= ~(PARENB | PARODD); // Disable parity
+    tty.c_cflag &= ~CSTOPB;            // 1 stop bit
+    tty.c_cflag &= ~CRTSCTS;           // Disable hardware flow control
 
-    tty.c_iflag &= ~IGNBRK; // Non ignorare i break
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY); // Disabilita controllo di flusso software
+    tty.c_iflag &= ~IGNBRK; // Don't ignore break signals
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY); // Disable software flow control
 
-    tty.c_lflag = 0; // Modalità raw, nessun echo
-    tty.c_oflag = 0; // Modalità raw
+    tty.c_lflag = 0; // Raw mode, no echo
+    tty.c_oflag = 0; // Raw mode
 
-    tty.c_cc[VMIN] = 1;  // Leggi almeno 1 carattere
-    tty.c_cc[VTIME] = 1; // Timeout di lettura 0.1 secondi
+    tty.c_cc[VMIN] = 1;  // Read at least 1 character
+    tty.c_cc[VTIME] = 1; // Timeout in 0.1 seconds
 
     if (tcsetattr(fd, TCSANOW, &tty) != 0)
     {
@@ -103,30 +108,39 @@ void send_character(int fd, char c)
     }
 }
 
-void print_timestamped_message(const char *serial_port)
+void *keyboard_listener(void *arg)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    printf("%15ld.%09ld: Character 0x80 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
+    char c;
+    while (keep_running)
+    {
+        c = getchar();
+        if (c == 'e' || c == 'E')
+        {
+            keep_running = 0;
+        }
+    }
+    return NULL;
 }
 
-void measure_performance(int fd, const char *serial_port)
+void measure_performance(int fd, const char *serial_port, long cycle_time_us)
 {
     struct timespec start, end, req, diff;
     long long min_jitter = 0, max_jitter = 0, total_jitter = 0;
-    long long expected_interval_ns = 1000000L; // 1 millisecondo in nanosecondi
+    long long expected_interval_ns = cycle_time_us * 1000L; // Convert microseconds to nanoseconds
 
     req.tv_sec = 0;
     req.tv_nsec = expected_interval_ns;
 
-    for (int i = 0; i < NUM_ITERATIONS; i++)
+    printf("Test is running... Press 'E' or 'e' to exit and get the statistics.\n");
+
+    while (keep_running)
     {
         clock_gettime(CLOCK_REALTIME, &start);
 
-        send_character(fd, 0x80);  // Per fronte di salita
-        print_timestamped_message(serial_port);
+        send_character(fd, 0x80);  // Rising edge
+        // No timestamp print during the test
 
-        // Attendi il prossimo periodo
+        // Wait for the next cycle
         if (nanosleep(&req, NULL) < 0)
         {
             perror("nanosleep failed");
@@ -135,7 +149,7 @@ void measure_performance(int fd, const char *serial_port)
 
         clock_gettime(CLOCK_REALTIME, &end);
 
-        // Calcola la differenza di tempo
+        // Calculate the time difference
         diff.tv_sec = end.tv_sec - start.tv_sec;
         diff.tv_nsec = end.tv_nsec - start.tv_nsec;
         if (diff.tv_nsec < 0) {
@@ -146,7 +160,7 @@ void measure_performance(int fd, const char *serial_port)
         long long actual_interval_ns = diff.tv_sec * 1000000000L + diff.tv_nsec;
         long long jitter = actual_interval_ns - expected_interval_ns;
 
-        if (i == 0) {
+        if (min_jitter == 0 && max_jitter == 0) {
             min_jitter = max_jitter = jitter;
         } else {
             if (jitter < min_jitter) min_jitter = jitter;
@@ -165,16 +179,20 @@ int main(int argc, char *argv[])
 {
     int fd;
     char *serial_port = NULL;
+    long cycle_time_us = DEFAULT_CYCLE_TIME_US;
     int opt;
 
     print_banner();
 
-    while ((opt = getopt(argc, argv, "p:h")) != -1)
+    while ((opt = getopt(argc, argv, "p:t:h")) != -1)
     {
         switch (opt)
         {
         case 'p':
             serial_port = optarg;
+            break;
+        case 't':
+            cycle_time_us = atol(optarg);
             break;
         case 'h':
         default:
@@ -195,9 +213,17 @@ int main(int argc, char *argv[])
     // Configure the serial port
     fd = configure_serial_port(serial_port);
     printf("Serial port %s configured at 1Mbit/s\n", serial_port);
+    printf("Cycle time set to %ld microseconds\n", cycle_time_us);
 
-    // Misura le performance dello scheduler RT
-    measure_performance(fd, serial_port);
+    // Start the keyboard listener in a separate thread
+    pthread_t keyboard_thread;
+    pthread_create(&keyboard_thread, NULL, keyboard_listener, NULL);
+
+    // Measure the performance of the RT scheduler
+    measure_performance(fd, serial_port, cycle_time_us);
+
+    // Wait for the keyboard listener thread to finish
+    pthread_join(keyboard_thread, NULL);
 
     close(fd);
     return 0;
