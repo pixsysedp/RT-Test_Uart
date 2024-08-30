@@ -13,6 +13,7 @@
 #define AUTHOR "Mauro Soligo"
 #define EMAIL "mauro.soligo@gmail.com"
 #define DATE "August 29, 2024"
+#define NUM_ITERATIONS 1000
 
 void print_banner()
 {
@@ -106,23 +107,63 @@ void print_timestamped_message(const char *serial_port)
 {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    printf("%15ld.%09ld: Character 0x01 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
+    printf("%15ld.%09ld: Character 0x80 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
 }
 
-void wait_for_start()
+void measure_performance(int fd, const char *serial_port)
 {
-    printf("Press 'P' to start the test...\n");
-    while (getchar() != 'P')
+    struct timespec start, end, req, diff;
+    long long min_jitter = 0, max_jitter = 0, total_jitter = 0;
+    long long expected_interval_ns = 1000000L; // 1 millisecondo in nanosecondi
+
+    req.tv_sec = 0;
+    req.tv_nsec = expected_interval_ns;
+
+    for (int i = 0; i < NUM_ITERATIONS; i++)
     {
-        // Aspetta che l'utente prema 'P'
+        clock_gettime(CLOCK_REALTIME, &start);
+
+        send_character(fd, 0x80);  // Per fronte di salita
+        print_timestamped_message(serial_port);
+
+        // Attendi il prossimo periodo
+        if (nanosleep(&req, NULL) < 0)
+        {
+            perror("nanosleep failed");
+            exit(EXIT_FAILURE);
+        }
+
+        clock_gettime(CLOCK_REALTIME, &end);
+
+        // Calcola la differenza di tempo
+        diff.tv_sec = end.tv_sec - start.tv_sec;
+        diff.tv_nsec = end.tv_nsec - start.tv_nsec;
+        if (diff.tv_nsec < 0) {
+            diff.tv_sec -= 1;
+            diff.tv_nsec += 1000000000L;
+        }
+
+        long long actual_interval_ns = diff.tv_sec * 1000000000L + diff.tv_nsec;
+        long long jitter = actual_interval_ns - expected_interval_ns;
+
+        if (i == 0) {
+            min_jitter = max_jitter = jitter;
+        } else {
+            if (jitter < min_jitter) min_jitter = jitter;
+            if (jitter > max_jitter) max_jitter = jitter;
+        }
+        total_jitter += jitter;
     }
-    printf("Test started...\n");
+
+    printf("\nPerformance Statistics:\n");
+    printf("Minimum jitter: %lld ns\n", min_jitter);
+    printf("Maximum jitter: %lld ns\n", max_jitter);
+    printf("Average jitter: %lld ns\n", total_jitter / NUM_ITERATIONS);
 }
 
 int main(int argc, char *argv[])
 {
     int fd;
-    struct timespec req;
     char *serial_port = NULL;
     int opt;
 
@@ -155,26 +196,8 @@ int main(int argc, char *argv[])
     fd = configure_serial_port(serial_port);
     printf("Serial port %s configured at 1Mbit/s\n", serial_port);
 
-    // Attendi l'inizio del test
-    wait_for_start();
-
-    // Set the periodic time interval to 0.5 ms
-    req.tv_sec = 0;
-    req.tv_nsec = 500000L; // 0.5 millisecond
-
-    while (1)
-    {
-        //send_character(fd, 0x80);  // Per fronte di salita
-        send_character(fd, 0x01);  // Per fronte di discesa
-        //print_timestamped_message(serial_port);
-
-        // Wait for the next period
-        if (nanosleep(&req, NULL) < 0)
-        {
-            perror("nanosleep failed");
-            exit(EXIT_FAILURE);
-        }
-    }
+    // Misura le performance dello scheduler RT
+    measure_performance(fd, serial_port);
 
     close(fd);
     return 0;
