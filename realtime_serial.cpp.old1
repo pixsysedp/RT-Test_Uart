@@ -19,9 +19,9 @@ void print_banner()
     printf("*******************************************\n");
     printf("* Real-Time Serial Test Program           *\n");
     printf("* Version: %-30s *\n", VERSION);
-    printf("* Date: %-33s *\n", DATE);
-    printf("* Author: %-31s *\n", AUTHOR);
-    printf("* Contact: %-30s *\n", EMAIL);
+    printf("* Date: %-32s *\n", DATE);
+    printf("* Author: %-29s *\n", AUTHOR);
+    printf("* Contact: %-28s *\n", EMAIL);
     printf("*******************************************\n\n");
 }
 
@@ -100,13 +100,6 @@ void send_character(int fd, char c)
     }
 }
 
-void print_timestamped_message(const char *serial_port)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    printf("%15ld.%09ld: Character 0x80 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
-}
-
 void wait_for_start()
 {
     printf("Press 'P' to start the test...\n");
@@ -164,7 +157,7 @@ int main(int argc, char *argv[])
     {
         send_character(fd, 0x80);  // Per fronte di salita
         // send_character(fd, 0x01);  // Per fronte di discesa
-        print_timestamped_message(serial_port);
+        printf("Character 0x80 sent on %s\n", serial_port);
 
         // Wait for the next period
         if (nanosleep(&req, NULL) < 0)
