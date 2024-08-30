@@ -39,6 +39,8 @@ void set_realtime_priority()
     {
         perror("sched_setscheduler failed");
         exit(EXIT_FAILURE);
+    } else {
+        printf("Process set to real-time priority (SCHED_FIFO) with priority 99.\n");
     }
 }
 
@@ -104,7 +106,7 @@ void print_timestamped_message(const char *serial_port)
 {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    printf("%15ld.%09ld: Character 0x80 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
+    printf("%15ld.%09ld: Character 0x01 sent on %s\n", ts.tv_sec, ts.tv_nsec, serial_port);
 }
 
 void wait_for_start()
@@ -156,15 +158,15 @@ int main(int argc, char *argv[])
     // Attendi l'inizio del test
     wait_for_start();
 
-    // Set the periodic time interval to 100 ns
+    // Set the periodic time interval to 0.5 ms
     req.tv_sec = 0;
-    req.tv_nsec = 100L; // 100 nanoseconds
+    req.tv_nsec = 500000L; // 0.5 millisecond
 
     while (1)
     {
-        send_character(fd, 0x80);  // Per fronte di salita
-        // send_character(fd, 0x01);  // Per fronte di discesa
-        print_timestamped_message(serial_port);
+        //send_character(fd, 0x80);  // Per fronte di salita
+        send_character(fd, 0x01);  // Per fronte di discesa
+        //print_timestamped_message(serial_port);
 
         // Wait for the next period
         if (nanosleep(&req, NULL) < 0)
