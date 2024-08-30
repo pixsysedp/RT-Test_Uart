@@ -156,9 +156,9 @@ int main(int argc, char *argv[])
     // Attendi l'inizio del test
     wait_for_start();
 
-    // Set the periodic time interval to 1 ms
+    // Set the periodic time interval to 100 ns
     req.tv_sec = 0;
-    req.tv_nsec = 1000000L; // 1 millisecond
+    req.tv_nsec = 100L; // 100 nanoseconds
 
     while (1)
     {
