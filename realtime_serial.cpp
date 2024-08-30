@@ -15,7 +15,7 @@
 #define EMAIL "mauro.soligo@gmail.com"
 #define DATE "August 29, 2024"
 #define DEFAULT_CYCLE_TIME_US 1000  // Default cycle time in microseconds
-#define NUM_ITERATIONS 1000
+#define DEFAULT_SAMPLING_TIME_SEC 10 // Default sampling time in seconds
 
 volatile int keep_running = 1;
 
@@ -32,9 +32,10 @@ void print_banner()
 
 void print_usage(const char *prog_name)
 {
-    printf("Usage: %s -p <serial_port> [-t <cycle_time_us>]\n", prog_name);
-    printf("  -p <serial_port>      Serial port (e.g., /dev/ttyS0)\n");
-    printf("  -t <cycle_time_us>    Cycle time in microseconds (default 1000 us)\n");
+    printf("Usage: %s -p <serial_port> [-t <cycle_time_us>] [-s <sampling_time_sec>]\n", prog_name);
+    printf("  -p <serial_port>         Serial port (e.g., /dev/ttyS0)\n");
+    printf("  -t <cycle_time_us>       Cycle time in microseconds (default 1000 us)\n");
+    printf("  -s <sampling_time_sec>   Sampling time in seconds (default 10 sec)\n");
 }
 
 void set_realtime_priority()
@@ -122,23 +123,23 @@ void *keyboard_listener(void *arg)
     return NULL;
 }
 
-void measure_performance(int fd, const char *serial_port, long cycle_time_us)
+void measure_performance(int fd, const char *serial_port, long cycle_time_us, int sampling_time_sec)
 {
-    struct timespec start, end, req, diff;
-    long long min_jitter = 0, max_jitter = 0, total_jitter = 0;
+    struct timespec start, end, req, diff, last_sample_time, current_time;
+    double min_jitter = 0, max_jitter = 0, total_jitter = 0;
     long long expected_interval_ns = cycle_time_us * 1000L; // Convert microseconds to nanoseconds
-
+    int iterations = 0;
     req.tv_sec = 0;
     req.tv_nsec = expected_interval_ns;
 
     printf("Test is running... Press 'E' or 'e' to exit and get the statistics.\n");
+    clock_gettime(CLOCK_REALTIME, &last_sample_time);
 
     while (keep_running)
     {
         clock_gettime(CLOCK_REALTIME, &start);
 
         send_character(fd, 0x80);  // Rising edge
-        // No timestamp print during the test
 
         // Wait for the next cycle
         if (nanosleep(&req, NULL) < 0)
@@ -158,21 +159,39 @@ void measure_performance(int fd, const char *serial_port, long cycle_time_us)
         }
 
         long long actual_interval_ns = diff.tv_sec * 1000000000L + diff.tv_nsec;
-        long long jitter = actual_interval_ns - expected_interval_ns;
+        double jitter_ns = (double)(actual_interval_ns - expected_interval_ns);
 
-        if (min_jitter == 0 && max_jitter == 0) {
-            min_jitter = max_jitter = jitter;
+        // Convert jitter to milliseconds with 6 decimal places
+        double jitter_ms = jitter_ns / 1000000.0;
+
+        if (iterations == 0) {
+            min_jitter = max_jitter = jitter_ms;
         } else {
-            if (jitter < min_jitter) min_jitter = jitter;
-            if (jitter > max_jitter) max_jitter = jitter;
+            if (jitter_ms < min_jitter) min_jitter = jitter_ms;
+            if (jitter_ms > max_jitter) max_jitter = jitter_ms;
         }
-        total_jitter += jitter;
+        total_jitter += jitter_ms;
+        iterations++;
+
+        // Check if it's time to print statistics
+        clock_gettime(CLOCK_REALTIME, &current_time);
+        diff.tv_sec = current_time.tv_sec - last_sample_time.tv_sec;
+        diff.tv_nsec = current_time.tv_nsec - last_sample_time.tv_nsec;
+        if (diff.tv_nsec < 0) {
+            diff.tv_sec -= 1;
+            diff.tv_nsec += 1000000000L;
+        }
+
+        if (diff.tv_sec >= sampling_time_sec) {
+            double avg_jitter = total_jitter / iterations;
+            printf("Min Jitter: %12.6f ms | Max Jitter: %12.6f ms | Avg Jitter: %12.6f ms\n", min_jitter, max_jitter, avg_jitter);
+            fflush(stdout);
+            last_sample_time = current_time;
+        }
     }
 
-    printf("\nPerformance Statistics:\n");
-    printf("Minimum jitter: %lld ns\n", min_jitter);
-    printf("Maximum jitter: %lld ns\n", max_jitter);
-    printf("Average jitter: %lld ns\n", total_jitter / NUM_ITERATIONS);
+    printf("\nFinal Performance Statistics:\n");
+    printf("Min Jitter: %12.6f ms | Max Jitter: %12.6f ms | Avg Jitter: %12.6f ms\n", min_jitter, max_jitter, total_jitter / iterations);
 }
 
 int main(int argc, char *argv[])
@@ -180,11 +199,12 @@ int main(int argc, char *argv[])
     int fd;
     char *serial_port = NULL;
     long cycle_time_us = DEFAULT_CYCLE_TIME_US;
+    int sampling_time_sec = DEFAULT_SAMPLING_TIME_SEC;
     int opt;
 
     print_banner();
 
-    while ((opt = getopt(argc, argv, "p:t:h")) != -1)
+    while ((opt = getopt(argc, argv, "p:t:s:h")) != -1)
     {
         switch (opt)
         {
@@ -193,6 +213,9 @@ int main(int argc, char *argv[])
             break;
         case 't':
             cycle_time_us = atol(optarg);
+            break;
+        case 's':
+            sampling_time_sec = atoi(optarg);
             break;
         case 'h':
         default:
@@ -214,13 +237,14 @@ int main(int argc, char *argv[])
     fd = configure_serial_port(serial_port);
     printf("Serial port %s configured at 1Mbit/s\n", serial_port);
     printf("Cycle time set to %ld microseconds\n", cycle_time_us);
+    printf("Sampling time set to %d seconds\n", sampling_time_sec);
 
     // Start the keyboard listener in a separate thread
     pthread_t keyboard_thread;
     pthread_create(&keyboard_thread, NULL, keyboard_listener, NULL);
 
     // Measure the performance of the RT scheduler
-    measure_performance(fd, serial_port, cycle_time_us);
+    measure_performance(fd, serial_port, cycle_time_us, sampling_time_sec);
 
     // Wait for the keyboard listener thread to finish
     pthread_join(keyboard_thread, NULL);
